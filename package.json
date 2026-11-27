@@ -1,0 +1,73 @@
+{
+  "name": "jwkcage",
+  "version": "1.0.0",
+  "description": "Zero-dependency RFC 7517 and RFC 7518 JWK, JWKS, and JWT header security firewall: algorithm-confusion, SSRF, injection, and weak-key defense",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/draarivpatel-ui/jwkcage"
+  },
+  "homepage": "https://github.com/draarivpatel-ui/jwkcage#readme",
+  "bugs": {
+    "url": "https://github.com/draarivpatel-ui/jwkcage/issues"
+  },
+  "type": "module",
+  "main": "./dist/cjs/index.cjs",
+  "module": "./src/index.mjs",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/index.mjs",
+      "require": "./dist/cjs/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "jwkcage": "bin/jwkcage.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "dist/cjs",
+    "types",
+    "examples",
+    "README.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:cjs": "node scripts/build-cjs.mjs",
+    "check:cjs": "node scripts/build-cjs.mjs --check",
+    "check:types": "node scripts/check-types.mjs",
+    "smoke": "node scripts/cli-smoke.mjs",
+    "test": "node scripts/run-tests.mjs",
+    "prepack": "node scripts/build-cjs.mjs --check --quiet"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "security",
+    "jwk",
+    "jwks",
+    "jwt",
+    "jws",
+    "jwe",
+    "rfc7517",
+    "rfc7518",
+    "rfc7638",
+    "algorithm-confusion",
+    "alg-none",
+    "ssrf",
+    "oidc",
+    "zero-dependency",
+    "nodejs"
+  ],
+  "author": "draarivpatel-ui",
+  "license": "MIT",
+  "sideEffects": false,
+  "dependencies": {},
+  "devDependencies": {}
+}

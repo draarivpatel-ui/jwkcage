@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: run test suite
+        shell: bash
+        run: node scripts/run-tests.mjs
+      - name: verify generated commonjs is current
+        shell: bash
+        run: node scripts/build-cjs.mjs --check
+      - name: type declarations compile
+        shell: bash
+        run: node scripts/check-types.mjs
+      - name: cli smoke
+        shell: bash
+        run: node scripts/cli-smoke.mjs
+      - name: examples run
+        shell: bash
+        run: |
+          node examples/verify-token-keys.mjs
+          node examples/audit-public-jwks.mjs
+          node examples/header-threat-scan.mjs
+      - name: pack without warnings
+        shell: bash
+        run: npm pack --dry-run
+      - name: verify package contents
+        shell: bash
+        run: node scripts/check-pack.mjs
