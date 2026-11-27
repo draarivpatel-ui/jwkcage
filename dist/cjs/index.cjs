@@ -342,21 +342,46 @@ function parseJsonStrict(text, maxDepth) {
   return value;
 }
 
-function scanObjectForPollution(value, depth, maxDepth) {
+function scanObjectForPollution(value, depth, maxDepth, stack = new Set()) {
   if (depth > maxDepth) fail(CODE.MALFORMED_JSON, 'object nesting exceeds depth budget');
-  if (value === null || typeof value !== 'object') return;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail(CODE.INVALID_INPUT, 'JSON object input contains a non-finite number');
+    return;
+  }
+  if (typeof value !== 'object') fail(CODE.INVALID_INPUT, 'JSON object input contains a non-JSON value');
+  if (stack.has(value)) fail(CODE.MALFORMED_JSON, 'JSON object input contains a circular reference');
+  stack.add(value);
+  if (Object.getOwnPropertySymbols(value).length > 0) fail(CODE.INVALID_INPUT, 'JSON object input contains symbol-keyed members');
   if (Array.isArray(value)) {
-    for (const item of value) scanObjectForPollution(item, depth + 1, maxDepth);
+    const names = Object.getOwnPropertyNames(value);
+    for (const key of names) {
+      if (key === 'length') continue;
+      if (!/^(0|[1-9][0-9]*)$/u.test(key)) fail(CODE.INVALID_INPUT, 'array input contains non-index members');
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || descriptor.enumerable !== true || descriptor.get !== undefined || descriptor.set !== undefined) {
+        fail(CODE.INVALID_INPUT, 'array input contains accessors or non-enumerable members');
+      }
+      scanObjectForPollution(descriptor.value, depth + 1, maxDepth, stack);
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) fail(CODE.INVALID_INPUT, 'array input contains holes');
+    }
+    stack.delete(value);
     return;
   }
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) {
     fail(CODE.PROTOTYPE_POLLUTION, 'input object has a nonstandard prototype');
   }
-  for (const key of Object.keys(value)) {
+  for (const key of Object.getOwnPropertyNames(value)) {
     if (POLLUTION.has(key)) fail(CODE.PROTOTYPE_POLLUTION, 'prototype pollution key in input object', { key });
-    scanObjectForPollution(value[key], depth + 1, maxDepth);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || descriptor.enumerable !== true) fail(CODE.INVALID_INPUT, 'object input contains non-enumerable members');
+    if (descriptor.get !== undefined || descriptor.set !== undefined) fail(CODE.PROTOTYPE_POLLUTION, 'object input contains accessor properties', { key });
+    scanObjectForPollution(descriptor.value, depth + 1, maxDepth, stack);
   }
+  stack.delete(value);
 }
 const __exports = Object.create(null);
 __exports["parseJsonStrict"] = parseJsonStrict;
@@ -622,7 +647,7 @@ function auditEndpointUrl(value, field) {
     const schemeEnd = value.indexOf('//');
     const authorityStart = schemeEnd === -1 ? 0 : schemeEnd + 2;
     let authorityEnd = value.length;
-    for (const delimiter of ['/', '?', '#']) {
+    for (const delimiter of ['/', '\\', '?', '#']) {
       const at = value.indexOf(delimiter, authorityStart);
       if (at !== -1 && at < authorityEnd) authorityEnd = at;
     }
@@ -677,6 +702,18 @@ function auditEndpointUrl(value, field) {
       if (labels.some((label) => label.startsWith('-') || label.endsWith('-'))) add('ENDPOINT_URL_HOST_HYPHEN_EDGE', 'medium', field + ' host label begins or ends with a hyphen');
     }
   }
+  if (!bracketed && rawHost.endsWith('.')) add('ENDPOINT_URL_TRAILING_DOT', 'high', field + ' host uses a trailing-dot fully qualified DNS form');
+  const canonicalHost = host.replace(/^\[|\]$/gu, '').toLowerCase();
+  if (!bracketed && canonicalHost !== '' && canonicalHost !== bareHost) {
+    const canonicalV4 = parseIpv4Like(canonicalHost.replace(/\.$/u, ''));
+    if (canonicalV4 && canonicalV4.numericLike && canonicalV4.valid) {
+      const scope = ipv4Scope(canonicalV4.bytes);
+      if (scope !== 'public') add('ENDPOINT_URL_IP_NOT_PUBLIC', 'critical', field + ' canonically targets a non-public IPv4 scope: ' + scope);
+    } else if (internalHostname(canonicalHost)) {
+      add('ENDPOINT_URL_INTERNAL_HOST', 'critical', field + ' canonically targets localhost or an internal name');
+    }
+  }
+  if (bracketed === false && /\\/u.test(value)) add('ENDPOINT_URL_BACKSLASH_CONFUSION', 'high', field + ' contains a backslash that URL parsers may treat as a delimiter');
   if (parsed.port !== '') {
     const portNumber = Number(parsed.port);
     if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) add('ENDPOINT_URL_BAD_PORT', 'high', field + ' uses an invalid port');
@@ -689,14 +726,58 @@ __exports["auditEndpointUrl"] = auditEndpointUrl;
 return __exports;
 })();
 
-/* src/keys.mjs */
+/* src/reporting.mjs */
 
 const __jwkcageModule5 = (() => {
+/* Bounded fail-closed severity-aware finding truncation. */
+const RANK = Object.freeze({ critical: 4, high: 3, medium: 2, low: 1, info: 0 });
+
+function rank(hit) {
+  return RANK[hit.severity] === undefined ? 0 : RANK[hit.severity];
+}
+
+function pushCappedFinding(findings, hit, cap) {
+  if (findings.length < cap) {
+    findings.push(hit);
+    return false;
+  }
+  const hitRank = rank(hit);
+  for (let index = findings.length - 1; index >= 0; index -= 1) {
+    if (rank(findings[index]) < hitRank) {
+      findings[index] = hit;
+      return true;
+    }
+  }
+  return true;
+}
+
+function capFindings(allFindings, cap) {
+  const limited = [];
+  let truncated = false;
+  for (const hit of allFindings) {
+    if (pushCappedFinding(limited, hit, cap)) truncated = true;
+  }
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+  for (const hit of limited) {
+    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
+  }
+  return { limited, counts, truncated };
+}
+const __exports = Object.create(null);
+__exports["pushCappedFinding"] = pushCappedFinding;
+__exports["capFindings"] = capFindings;
+return __exports;
+})();
+
+/* src/keys.mjs */
+
+const __jwkcageModule6 = (() => {
 const { createHash } = require("node:crypto");
 const { ASYMMETRIC_PRIVATE_PARAMETERS, CURVE_FOR_ES, DEFAULT_ALLOWED_CURVES, DEFAULT_BOUNDS, DEPRECATED_ALGORITHMS, EC_CURVE_BYTES, HARD_BOUNDS, JWKCAGE_ERROR_CODES: CODE, JWKCAGE_SEVERITY: SEV, KEY_OPS_VALUES, KEY_TYPES, MIN_OCT_BYTES, MIN_RSA_EXPONENT, MIN_RSA_MODULUS_BITS, OKP_CURVE_BYTES, PRIVATE_KEY_PARAMETERS, USE_VALUES } = __jwkcageModule0;
 const { fail, JwkCageError } = __jwkcageModule1;
 const { parseJsonStrict, scanObjectForPollution } = __jwkcageModule2;
 const { auditEndpointUrl } = __jwkcageModule4;
+const { capFindings } = __jwkcageModule5;
 /* JWK structural parsing, strength auditing, private-material stripping, RFC 7638 thumbprints. */
 const BASE64URL_RE = /^[A-Za-z0-9_-]*$/u;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/u;
@@ -779,7 +860,6 @@ function normalizeBounds(options) {
 function materializeJsonInput(input, bounds, maxDepth, caller) {
   if (typeof input === 'string') {
     if (Buffer.byteLength(input, 'utf8') > bounds.maxJsonBytes) fail(CODE.INPUT_TOO_LARGE, caller + ' JSON input exceeds the byte budget');
-    if (CONTROL_RE.test(input)) fail(CODE.MALFORMED_JSON, caller + ' input contains control characters');
     const parsed = parseJsonStrict(input, maxDepth);
     if (!isPlainObject(parsed)) fail(CODE.INVALID_INPUT, caller + ' JSON input must be an object');
     return parsed;
@@ -836,6 +916,12 @@ function expectBase64url(object, key, required) {
     return undefined;
   }
   if (!isBase64url(value)) fail(CODE.INVALID_BASE64URL, key + ' is not valid unpadded base64url', { field: key });
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const last = alphabet.indexOf(value[value.length - 1]);
+  const remainder = value.length % 4;
+  if ((remainder === 2 && (last & 15) !== 0) || (remainder === 3 && (last & 3) !== 0)) {
+    fail(CODE.INVALID_BASE64URL, key + ' has non-canonical base64url pad bits', { field: key });
+  }
   return value;
 }
 
@@ -897,6 +983,36 @@ function validateRsa(key, bounds) {
   return { modulus, exponent: base64urlBigInt(key.e), modulusBits: countBits(modulus) };
 }
 
+const EC_CURVE_PARAMETERS = Object.freeze({
+  'P-256': Object.freeze({
+    p: BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff'),
+    b: BigInt('0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b')
+  }),
+  'P-384': Object.freeze({
+    p: BigInt('0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff'),
+    b: BigInt('0xb3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef')
+  }),
+  'P-521': Object.freeze({
+    p: BigInt('0x01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'),
+    b: BigInt('0x0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00')
+  })
+});
+
+function positiveMod(value, modulus) {
+  const out = value % modulus;
+  return out >= 0n ? out : out + modulus;
+}
+
+function validateEcPoint(crv, xInt, yInt) {
+  const params = EC_CURVE_PARAMETERS[crv];
+  if (xInt >= params.p || yInt >= params.p) {
+    fail(CODE.INVALID_EC_PARAMETERS, 'EC coordinate is outside the ' + crv + ' field', { field: 'x' });
+  }
+  const left = positiveMod(yInt * yInt, params.p);
+  const right = positiveMod(xInt * xInt * xInt - 3n * xInt + params.b, params.p);
+  if (left !== right) fail(CODE.INVALID_EC_PARAMETERS, 'EC public point is not on ' + crv, { field: 'x' });
+}
+
 function validateEc(key) {
   const crv = expectString(key, 'crv', { maxStringLength: 64 }, true);
   expectBase64url(key, 'x', true);
@@ -910,6 +1026,7 @@ function validateEc(key) {
   const xInt = base64urlBigInt(key.x);
   const yInt = base64urlBigInt(key.y);
   if (xInt === 0n && yInt === 0n) fail(CODE.INVALID_EC_PARAMETERS, 'point at infinity origin is not a valid public key', { field: 'x' });
+  validateEcPoint(crv, xInt, yInt);
   return { crv };
 }
 
@@ -1044,6 +1161,9 @@ function auditJwk(input, options) {
     else {
       const familyMismatch = algFamilyMismatch(key.alg, structure.family);
       if (familyMismatch) findings.push(finding('ALG_KTY_MISMATCH', 'critical', 'alg', key.alg + ' cannot be used with key type ' + structure.family));
+      if (!familyMismatch && structure.family === 'EC' && CURVE_FOR_ES[key.alg] !== undefined && structure.crv !== CURVE_FOR_ES[key.alg]) {
+        findings.push(finding('ALG_CURVE_MISMATCH', 'critical', 'alg', key.alg + ' cannot be used with curve ' + structure.crv));
+      }
     }
   }
   if (key.kid !== undefined) {
@@ -1082,19 +1202,15 @@ function algFamilyMismatch(alg, family) {
 
 function finalizeReport(findings, opts, bounds) {
   const cap = bounds === undefined ? DEFAULT_BOUNDS.maxFindings : bounds.maxFindings;
-  const truncated = findings.length > cap;
-  const limited = truncated ? findings.slice(0, cap) : findings;
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const hit of limited) {
-    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
-  }
+  const capped = capFindings(findings, cap);
+  const counts = capped.counts;
   const safe = counts.critical === 0 && counts.high === 0;
   return deepFreeze({
     safe,
-    findings: limited.map((hit) => Object.freeze({ ...hit })),
+    findings: capped.limited.map((hit) => Object.freeze({ ...hit })),
     counts,
-    truncated,
-    keysAudited: limited.length === 0 ? 0 : 1,
+    truncated: capped.truncated,
+    keysAudited: 1,
     context: opts.context === undefined ? 'jwk' : String(opts.context)
   });
 }
@@ -1158,11 +1274,12 @@ return __exports;
 
 /* src/header.mjs */
 
-const __jwkcageModule6 = (() => {
+const __jwkcageModule7 = (() => {
 const { DEPRECATED_ALGORITHMS, HMAC_ALGORITHMS, JWKCAGE_ERROR_CODES: CODE, JWE_CONTENT_ENCRYPTION, SIGNING_ALGORITHMS } = __jwkcageModule0;
 const { JwkCageError } = __jwkcageModule1;
-const { auditKidString, deepFreeze, isBase64url, materializeJsonInput, normalizeBounds, normalizeOptions } = __jwkcageModule5;
+const { auditKidString, deepFreeze, isBase64url, materializeJsonInput, normalizeBounds, normalizeOptions } = __jwkcageModule6;
 const { auditEndpointUrl } = __jwkcageModule4;
+const { capFindings } = __jwkcageModule5;
 /* JWS/JWE header security auditing: algorithm confusion, inline key injection, SSRF endpoints, kid injection. */
 const REGISTERED_HEADER_PARAMETERS = new Set([
   'alg', 'jku', 'jwk', 'kid', 'x5u', 'x5c', 'x5t', 'x5t#S256', 'typ', 'cty', 'crit',
@@ -1181,19 +1298,15 @@ function finding(code, severity, field, message) {
   return { code, severity, field, message };
 }
 
-function finalizeReport(findings, cap) {
-  const truncated = findings.length > cap;
-  const limited = truncated ? findings.slice(0, cap) : findings;
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const hit of limited) {
-    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
-  }
+function finalizeReport(allFindings, cap) {
+  const capped = capFindings(allFindings, cap);
+  const counts = capped.counts;
   const safe = counts.critical === 0 && counts.high === 0;
   return deepFreeze({
     safe,
-    findings: limited.map((hit) => Object.freeze({ ...hit })),
+    findings: capped.limited.map((hit) => Object.freeze({ ...hit })),
     counts,
-    truncated,
+    truncated: capped.truncated,
     keysAudited: 0,
     context: 'jwt-header'
   });
@@ -1218,7 +1331,7 @@ function auditJwtHeader(input, options) {
   }
   const findings = [];
   const push = (hit) => {
-    if (findings.length < cap) findings.push(hit);
+    findings.push(hit);
   };
   if (Object.keys(header).length > bounds.maxObjectKeys) {
     push(finding('HEADER_TOO_MANY_MEMBERS', 'high', 'header', 'header exceeds the member-count budget'));
@@ -1342,10 +1455,11 @@ return __exports;
 
 /* src/jwks.mjs */
 
-const __jwkcageModule7 = (() => {
-const { CURVE_FOR_ES, HMAC_ALGORITHMS, JWKCAGE_ERROR_CODES: CODE, KEY_TYPES, PRIVATE_KEY_PARAMETERS, SIGNING_ALGORITHMS } = __jwkcageModule0;
+const __jwkcageModule8 = (() => {
+const { CURVE_FOR_ES, DEFAULT_BOUNDS, HMAC_ALGORITHMS, JWKCAGE_ERROR_CODES: CODE, KEY_TYPES, PRIVATE_KEY_PARAMETERS, SIGNING_ALGORITHMS } = __jwkcageModule0;
 const { fail } = __jwkcageModule1;
-const { auditJwk, computeJwkThumbprint, deepFreeze, isPlainObject, materializeJsonInput, normalizeBounds, normalizeOptions, stripPrivateMaterial, validateJwkStructure } = __jwkcageModule5;
+const { auditJwk, computeJwkThumbprint, deepFreeze, isPlainObject, materializeJsonInput, normalizeBounds, normalizeOptions, stripPrivateMaterial, validateJwkStructure } = __jwkcageModule6;
+const { capFindings } = __jwkcageModule5;
 /* JWKS auditing and fail-closed verification-key selection. */
 function finding(code, severity, field, message, extra) {
   const out = { code, severity, field, message };
@@ -1353,17 +1467,15 @@ function finding(code, severity, field, message, extra) {
   return out;
 }
 
-function finalizeReport(findings, keyCount, truncated) {
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const hit of findings) {
-    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
-  }
+function finalizeReport(allFindings, keyCount, cap) {
+  const capped = capFindings(allFindings, cap);
+  const counts = capped.counts;
   const safe = counts.critical === 0 && counts.high === 0;
   return deepFreeze({
     safe,
-    findings: findings.map((hit) => Object.freeze({ ...hit })),
+    findings: capped.limited.map((hit) => Object.freeze({ ...hit })),
     counts,
-    truncated,
+    truncated: capped.truncated,
     keysAudited: keyCount,
     context: 'jwks'
   });
@@ -1376,29 +1488,27 @@ function auditJwks(input, options) {
   try {
     bounds = normalizeBounds(opts);
   } catch (error) {
-    return finalizeReport([finding('INVALID_OPTIONS', 'critical', 'options', error.message)], 0, false);
+    return finalizeReport([finding('INVALID_OPTIONS', 'critical', 'options', error.message)], 0, DEFAULT_BOUNDS.maxFindings);
   }
   const cap = bounds.maxFindings;
   const findings = [];
-  let truncated = false;
   const push = (hit) => {
-    if (findings.length < cap) findings.push(hit);
-    else truncated = true;
+    findings.push(hit);
   };
   let set;
   try {
     set = materializeJsonInput(input, bounds, bounds.maxDepth, 'auditJwks');
   } catch (error) {
     push(finding(error.code === undefined ? 'INVALID_INPUT' : error.code.replace('JWKCAGE_', ''), 'critical', 'input', error.message));
-    return finalizeReport(findings, 0, truncated);
+    return finalizeReport(findings, 0, cap);
   }
   if (!Array.isArray(set.keys)) {
     push(finding('INVALID_JWKS', 'critical', 'keys', 'JWKS must carry a keys array'));
-    return finalizeReport(findings, 0, truncated);
+    return finalizeReport(findings, 0, cap);
   }
   if (set.keys.length > bounds.maxKeys) {
     push(finding('JWKS_TOO_MANY_KEYS', 'critical', 'keys', 'JWKS exceeds the key-count budget'));
-    return finalizeReport(findings, set.keys.length, truncated);
+    return finalizeReport(findings, set.keys.length, cap);
   }
   const keyCount = set.keys.length;
   if (keyCount === 0) push(finding('JWKS_EMPTY', 'medium', 'keys', 'JWKS contains no keys'));
@@ -1459,7 +1569,7 @@ function auditJwks(input, options) {
     }
     if (missing > 0) push(finding('KID_REQUIRED', 'critical', 'keys', missing + ' key(s) lack the policy-required kid'));
   }
-  return finalizeReport(findings, keyCount, truncated);
+  return finalizeReport(findings, keyCount, cap);
 }
 
 function algorithmCompatibleWithKey(alg, key) {
@@ -1577,12 +1687,12 @@ return __exports;
 
 /* src/index.mjs */
 
-const __jwkcageModule8 = (() => {
+const __jwkcageModule9 = (() => {
 const { ASYMMETRIC_PRIVATE_PARAMETERS, CURVE_FOR_ES, DEFAULT_ALLOWED_CURVES, DEFAULT_BOUNDS, DEPRECATED_ALGORITHMS, EC_ALGORITHMS, EC_CURVE_BYTES, HARD_BOUNDS, HMAC_ALGORITHMS, JWE_CONTENT_ENCRYPTION, JWKCAGE_ERROR_CODES, JWKCAGE_SEVERITY, JWKCAGE_VERSION, KEY_OPS_VALUES, KEY_TYPES, MIN_OCT_BYTES, MIN_RSA_EXPONENT, MIN_RSA_MODULUS_BITS, OCT_ALGORITHMS, OKP_ALGORITHMS, OKP_CURVE_BYTES, PRIVATE_KEY_PARAMETERS, PROTOTYPE_POLLUTION_KEYS, RSA_ALGORITHMS, SIGNING_ALGORITHMS, USE_VALUES } = __jwkcageModule0;
 const { isJwkCageError, JwkCageError } = __jwkcageModule1;
-const { auditJwk, auditKidString, computeJwkThumbprint, parseJwk, stripPrivateMaterial } = __jwkcageModule5;
-const { auditJwks, selectVerificationKey } = __jwkcageModule7;
-const { auditJwtHeader } = __jwkcageModule6;
+const { auditJwk, auditKidString, computeJwkThumbprint, parseJwk, stripPrivateMaterial } = __jwkcageModule6;
+const { auditJwks, selectVerificationKey } = __jwkcageModule8;
+const { auditJwtHeader } = __jwkcageModule7;
 const { auditEndpointUrl } = __jwkcageModule4;
 const JwkCage = Object.freeze({
   ASYMMETRIC_PRIVATE_PARAMETERS,
@@ -1666,43 +1776,43 @@ return __exports;
 })();
 
 module.exports = {
-  ASYMMETRIC_PRIVATE_PARAMETERS: __jwkcageModule8["ASYMMETRIC_PRIVATE_PARAMETERS"],
-  CURVE_FOR_ES: __jwkcageModule8["CURVE_FOR_ES"],
-  DEFAULT_ALLOWED_CURVES: __jwkcageModule8["DEFAULT_ALLOWED_CURVES"],
-  DEFAULT_BOUNDS: __jwkcageModule8["DEFAULT_BOUNDS"],
-  DEPRECATED_ALGORITHMS: __jwkcageModule8["DEPRECATED_ALGORITHMS"],
-  EC_ALGORITHMS: __jwkcageModule8["EC_ALGORITHMS"],
-  EC_CURVE_BYTES: __jwkcageModule8["EC_CURVE_BYTES"],
-  HARD_BOUNDS: __jwkcageModule8["HARD_BOUNDS"],
-  HMAC_ALGORITHMS: __jwkcageModule8["HMAC_ALGORITHMS"],
-  JWE_CONTENT_ENCRYPTION: __jwkcageModule8["JWE_CONTENT_ENCRYPTION"],
-  JWKCAGE_ERROR_CODES: __jwkcageModule8["JWKCAGE_ERROR_CODES"],
-  JWKCAGE_SEVERITY: __jwkcageModule8["JWKCAGE_SEVERITY"],
-  JWKCAGE_VERSION: __jwkcageModule8["JWKCAGE_VERSION"],
-  KEY_OPS_VALUES: __jwkcageModule8["KEY_OPS_VALUES"],
-  KEY_TYPES: __jwkcageModule8["KEY_TYPES"],
-  MIN_OCT_BYTES: __jwkcageModule8["MIN_OCT_BYTES"],
-  MIN_RSA_EXPONENT: __jwkcageModule8["MIN_RSA_EXPONENT"],
-  MIN_RSA_MODULUS_BITS: __jwkcageModule8["MIN_RSA_MODULUS_BITS"],
-  OCT_ALGORITHMS: __jwkcageModule8["OCT_ALGORITHMS"],
-  OKP_ALGORITHMS: __jwkcageModule8["OKP_ALGORITHMS"],
-  OKP_CURVE_BYTES: __jwkcageModule8["OKP_CURVE_BYTES"],
-  PRIVATE_KEY_PARAMETERS: __jwkcageModule8["PRIVATE_KEY_PARAMETERS"],
-  PROTOTYPE_POLLUTION_KEYS: __jwkcageModule8["PROTOTYPE_POLLUTION_KEYS"],
-  RSA_ALGORITHMS: __jwkcageModule8["RSA_ALGORITHMS"],
-  SIGNING_ALGORITHMS: __jwkcageModule8["SIGNING_ALGORITHMS"],
-  USE_VALUES: __jwkcageModule8["USE_VALUES"],
-  JwkCageError: __jwkcageModule8["JwkCageError"],
-  isJwkCageError: __jwkcageModule8["isJwkCageError"],
-  parseJwk: __jwkcageModule8["parseJwk"],
-  auditJwk: __jwkcageModule8["auditJwk"],
-  auditJwks: __jwkcageModule8["auditJwks"],
-  auditJwtHeader: __jwkcageModule8["auditJwtHeader"],
-  selectVerificationKey: __jwkcageModule8["selectVerificationKey"],
-  stripPrivateMaterial: __jwkcageModule8["stripPrivateMaterial"],
-  computeJwkThumbprint: __jwkcageModule8["computeJwkThumbprint"],
-  auditEndpointUrl: __jwkcageModule8["auditEndpointUrl"],
-  auditKidString: __jwkcageModule8["auditKidString"],
+  ASYMMETRIC_PRIVATE_PARAMETERS: __jwkcageModule9["ASYMMETRIC_PRIVATE_PARAMETERS"],
+  CURVE_FOR_ES: __jwkcageModule9["CURVE_FOR_ES"],
+  DEFAULT_ALLOWED_CURVES: __jwkcageModule9["DEFAULT_ALLOWED_CURVES"],
+  DEFAULT_BOUNDS: __jwkcageModule9["DEFAULT_BOUNDS"],
+  DEPRECATED_ALGORITHMS: __jwkcageModule9["DEPRECATED_ALGORITHMS"],
+  EC_ALGORITHMS: __jwkcageModule9["EC_ALGORITHMS"],
+  EC_CURVE_BYTES: __jwkcageModule9["EC_CURVE_BYTES"],
+  HARD_BOUNDS: __jwkcageModule9["HARD_BOUNDS"],
+  HMAC_ALGORITHMS: __jwkcageModule9["HMAC_ALGORITHMS"],
+  JWE_CONTENT_ENCRYPTION: __jwkcageModule9["JWE_CONTENT_ENCRYPTION"],
+  JWKCAGE_ERROR_CODES: __jwkcageModule9["JWKCAGE_ERROR_CODES"],
+  JWKCAGE_SEVERITY: __jwkcageModule9["JWKCAGE_SEVERITY"],
+  JWKCAGE_VERSION: __jwkcageModule9["JWKCAGE_VERSION"],
+  KEY_OPS_VALUES: __jwkcageModule9["KEY_OPS_VALUES"],
+  KEY_TYPES: __jwkcageModule9["KEY_TYPES"],
+  MIN_OCT_BYTES: __jwkcageModule9["MIN_OCT_BYTES"],
+  MIN_RSA_EXPONENT: __jwkcageModule9["MIN_RSA_EXPONENT"],
+  MIN_RSA_MODULUS_BITS: __jwkcageModule9["MIN_RSA_MODULUS_BITS"],
+  OCT_ALGORITHMS: __jwkcageModule9["OCT_ALGORITHMS"],
+  OKP_ALGORITHMS: __jwkcageModule9["OKP_ALGORITHMS"],
+  OKP_CURVE_BYTES: __jwkcageModule9["OKP_CURVE_BYTES"],
+  PRIVATE_KEY_PARAMETERS: __jwkcageModule9["PRIVATE_KEY_PARAMETERS"],
+  PROTOTYPE_POLLUTION_KEYS: __jwkcageModule9["PROTOTYPE_POLLUTION_KEYS"],
+  RSA_ALGORITHMS: __jwkcageModule9["RSA_ALGORITHMS"],
+  SIGNING_ALGORITHMS: __jwkcageModule9["SIGNING_ALGORITHMS"],
+  USE_VALUES: __jwkcageModule9["USE_VALUES"],
+  JwkCageError: __jwkcageModule9["JwkCageError"],
+  isJwkCageError: __jwkcageModule9["isJwkCageError"],
+  parseJwk: __jwkcageModule9["parseJwk"],
+  auditJwk: __jwkcageModule9["auditJwk"],
+  auditJwks: __jwkcageModule9["auditJwks"],
+  auditJwtHeader: __jwkcageModule9["auditJwtHeader"],
+  selectVerificationKey: __jwkcageModule9["selectVerificationKey"],
+  stripPrivateMaterial: __jwkcageModule9["stripPrivateMaterial"],
+  computeJwkThumbprint: __jwkcageModule9["computeJwkThumbprint"],
+  auditEndpointUrl: __jwkcageModule9["auditEndpointUrl"],
+  auditKidString: __jwkcageModule9["auditKidString"],
 };
 
 module.exports.default = module.exports;

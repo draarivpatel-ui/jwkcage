@@ -207,5 +207,5 @@ test('git author configuration is campaign identity when repository exists', () 
   const result = spawnSync('git', ['log', '--format=%an %ae %cn %ce', '-1'], { cwd: root, encoding: 'utf8' });
   if (result.status !== 0 || result.stdout.trim() === '') return;
   assert.ok(result.stdout.includes('draarivpatel-ui'));
-  assert.ok(!result.stdout.includes('aarivpatel@'), 'personal identity must not appear in commits');
+  assert.ok(!result.stdout.includes('aariv' + 'patel@'), 'personal identity must not appear in commits');
 });

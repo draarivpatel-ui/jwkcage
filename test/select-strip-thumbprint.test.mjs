@@ -225,7 +225,7 @@ test('selectVerificationKey respects key alg pinning mismatch', () => {
 });
 
 test('selectVerificationKey es256 requires matching p256 curve', () => {
-  const p384 = { kty: 'EC', crv: 'P-384', x: 'B' + 'A'.repeat(63), y: 'B' + 'A'.repeat(63), kid: 'ec384', use: 'sig' };
+  const p384 = { kty: 'EC', crv: 'P-384', x: 'q73bKgKpNGiIXnLqwDqdMh1lBl7qSlKdb75NIxTUVohQ_IyjiU13ZC0Cxznyf6g8', y: 'Ha0cKPjzC2vZCcFL4f6XQ-AdQakDJ10I45T3pXufBeLGWtV7TIKh2duTaK44mp12', kid: 'ec384', use: 'sig' };
   expectSelectError(publicJwks([p384]), { alg: 'ES256', kid: 'ec384' }, { algorithms: ['ES256'] }, 'JWKCAGE_KEY_NOT_FOUND');
 });
 

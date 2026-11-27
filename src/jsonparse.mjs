@@ -193,19 +193,44 @@ export function parseJsonStrict(text, maxDepth) {
   return value;
 }
 
-export function scanObjectForPollution(value, depth, maxDepth) {
+export function scanObjectForPollution(value, depth, maxDepth, stack = new Set()) {
   if (depth > maxDepth) fail(CODE.MALFORMED_JSON, 'object nesting exceeds depth budget');
-  if (value === null || typeof value !== 'object') return;
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail(CODE.INVALID_INPUT, 'JSON object input contains a non-finite number');
+    return;
+  }
+  if (typeof value !== 'object') fail(CODE.INVALID_INPUT, 'JSON object input contains a non-JSON value');
+  if (stack.has(value)) fail(CODE.MALFORMED_JSON, 'JSON object input contains a circular reference');
+  stack.add(value);
+  if (Object.getOwnPropertySymbols(value).length > 0) fail(CODE.INVALID_INPUT, 'JSON object input contains symbol-keyed members');
   if (Array.isArray(value)) {
-    for (const item of value) scanObjectForPollution(item, depth + 1, maxDepth);
+    const names = Object.getOwnPropertyNames(value);
+    for (const key of names) {
+      if (key === 'length') continue;
+      if (!/^(0|[1-9][0-9]*)$/u.test(key)) fail(CODE.INVALID_INPUT, 'array input contains non-index members');
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || descriptor.enumerable !== true || descriptor.get !== undefined || descriptor.set !== undefined) {
+        fail(CODE.INVALID_INPUT, 'array input contains accessors or non-enumerable members');
+      }
+      scanObjectForPollution(descriptor.value, depth + 1, maxDepth, stack);
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) fail(CODE.INVALID_INPUT, 'array input contains holes');
+    }
+    stack.delete(value);
     return;
   }
   const proto = Object.getPrototypeOf(value);
   if (proto !== Object.prototype && proto !== null) {
     fail(CODE.PROTOTYPE_POLLUTION, 'input object has a nonstandard prototype');
   }
-  for (const key of Object.keys(value)) {
+  for (const key of Object.getOwnPropertyNames(value)) {
     if (POLLUTION.has(key)) fail(CODE.PROTOTYPE_POLLUTION, 'prototype pollution key in input object', { key });
-    scanObjectForPollution(value[key], depth + 1, maxDepth);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || descriptor.enumerable !== true) fail(CODE.INVALID_INPUT, 'object input contains non-enumerable members');
+    if (descriptor.get !== undefined || descriptor.set !== undefined) fail(CODE.PROTOTYPE_POLLUTION, 'object input contains accessor properties', { key });
+    scanObjectForPollution(descriptor.value, depth + 1, maxDepth, stack);
   }
+  stack.delete(value);
 }

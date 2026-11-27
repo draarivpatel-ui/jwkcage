@@ -95,10 +95,15 @@ test('auditJwk rsa 4096 acceptable', () => {
 });
 
 const curveCases = [];
+const VALID_EC_POINTS = {
+  'P-256': { x: 'S-9aV0QIqaT8Epgpifg_Py5oennvh1xkWYicAldZCZ8', y: '7JMwOharzFE2SMiPhEObwyAL-nInqjhUzzWt7_8VuuM' },
+  'P-384': { x: 'q73bKgKpNGiIXnLqwDqdMh1lBl7qSlKdb75NIxTUVohQ_IyjiU13ZC0Cxznyf6g8', y: 'Ha0cKPjzC2vZCcFL4f6XQ-AdQakDJ10I45T3pXufBeLGWtV7TIKh2duTaK44mp12' },
+  'P-521': { x: 'APKhXsK038lKIB3YEavQ2XutUiqTCLvaMoJ-NuuGrcYT2lHH3PhBWtn834BnRlzZAvyvPRuXNqO7RavzRdoVqKAp', y: 'ASlt9yaZmB2gDea1XjFKJE7Xr497Py8zFeTHdABzGazpCKlSJtLaA1lfZ9srEb5EUfIcZI160xRxWd8Y1LY_kjVw' }
+};
 for (const crv of ['P-256', 'P-384', 'P-521']) {
   curveCases.push({
     name: 'ec curve allowed ' + crv,
-    input: { kty: 'EC', crv, x: 'B' + 'A'.repeat(crv === 'P-256' ? 42 : crv === 'P-384' ? 63 : 87), y: 'B' + 'A'.repeat(crv === 'P-256' ? 42 : crv === 'P-384' ? 63 : 87) },
+    input: { kty: 'EC', crv, x: VALID_EC_POINTS[crv].x, y: VALID_EC_POINTS[crv].y },
     expectSafe: true
   });
 }

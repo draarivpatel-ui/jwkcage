@@ -24,8 +24,8 @@ export const RSA_PRIVATE = Object.freeze({
 export const EC_PUBLIC = Object.freeze({
   kty: 'EC',
   crv: 'P-256',
-  x: 'XZLnr4a5ulO5Li9QUtrVf4HMVttSVF9XMMA0Bch6Yko',
-  y: 'iQE4OpBu21sqlgFYAt3NvKrYkq-Ii8GlQ1BGbWOWZgs',
+  x: 'S-9aV0QIqaT8Epgpifg_Py5oennvh1xkWYicAldZCZ8',
+  y: '7JMwOharzFE2SMiPhEObwyAL-nInqjhUzzWt7_8VuuM',
   alg: 'ES256',
   use: 'sig',
   kid: 'ec-test-1'
@@ -51,11 +51,7 @@ export const RFC7638_RSA = Object.freeze({
 export const RFC7638_THUMBPRINT = 'NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs';
 
 export function symmetricKey(byteLength) {
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-  const rawLength = Math.ceil((byteLength * 8) / 6);
-  let out = '';
-  for (let index = 0; index < rawLength; index += 1) out += alphabet[index % alphabet.length];
-  return out.slice(0, rawLength);
+  return Buffer.from(Array.from({ length: byteLength }, (_unused, index) => (index * 19 + 7) % 256)).toString('base64url');
 }
 
 export const OCT_KEY = Object.freeze({

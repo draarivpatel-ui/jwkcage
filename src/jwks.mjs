@@ -1,6 +1,7 @@
 /* JWKS auditing and fail-closed verification-key selection. */
 import {
   CURVE_FOR_ES,
+  DEFAULT_BOUNDS,
   HMAC_ALGORITHMS,
   JWKCAGE_ERROR_CODES as CODE,
   KEY_TYPES,
@@ -19,6 +20,7 @@ import {
   stripPrivateMaterial,
   validateJwkStructure
 } from './keys.mjs';
+import { capFindings } from './reporting.mjs';
 
 function finding(code, severity, field, message, extra) {
   const out = { code, severity, field, message };
@@ -26,17 +28,15 @@ function finding(code, severity, field, message, extra) {
   return out;
 }
 
-function finalizeReport(findings, keyCount, truncated) {
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const hit of findings) {
-    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
-  }
+function finalizeReport(allFindings, keyCount, cap) {
+  const capped = capFindings(allFindings, cap);
+  const counts = capped.counts;
   const safe = counts.critical === 0 && counts.high === 0;
   return deepFreeze({
     safe,
-    findings: findings.map((hit) => Object.freeze({ ...hit })),
+    findings: capped.limited.map((hit) => Object.freeze({ ...hit })),
     counts,
-    truncated,
+    truncated: capped.truncated,
     keysAudited: keyCount,
     context: 'jwks'
   });
@@ -49,29 +49,27 @@ export function auditJwks(input, options) {
   try {
     bounds = normalizeBounds(opts);
   } catch (error) {
-    return finalizeReport([finding('INVALID_OPTIONS', 'critical', 'options', error.message)], 0, false);
+    return finalizeReport([finding('INVALID_OPTIONS', 'critical', 'options', error.message)], 0, DEFAULT_BOUNDS.maxFindings);
   }
   const cap = bounds.maxFindings;
   const findings = [];
-  let truncated = false;
   const push = (hit) => {
-    if (findings.length < cap) findings.push(hit);
-    else truncated = true;
+    findings.push(hit);
   };
   let set;
   try {
     set = materializeJsonInput(input, bounds, bounds.maxDepth, 'auditJwks');
   } catch (error) {
     push(finding(error.code === undefined ? 'INVALID_INPUT' : error.code.replace('JWKCAGE_', ''), 'critical', 'input', error.message));
-    return finalizeReport(findings, 0, truncated);
+    return finalizeReport(findings, 0, cap);
   }
   if (!Array.isArray(set.keys)) {
     push(finding('INVALID_JWKS', 'critical', 'keys', 'JWKS must carry a keys array'));
-    return finalizeReport(findings, 0, truncated);
+    return finalizeReport(findings, 0, cap);
   }
   if (set.keys.length > bounds.maxKeys) {
     push(finding('JWKS_TOO_MANY_KEYS', 'critical', 'keys', 'JWKS exceeds the key-count budget'));
-    return finalizeReport(findings, set.keys.length, truncated);
+    return finalizeReport(findings, set.keys.length, cap);
   }
   const keyCount = set.keys.length;
   if (keyCount === 0) push(finding('JWKS_EMPTY', 'medium', 'keys', 'JWKS contains no keys'));
@@ -132,7 +130,7 @@ export function auditJwks(input, options) {
     }
     if (missing > 0) push(finding('KID_REQUIRED', 'critical', 'keys', missing + ' key(s) lack the policy-required kid'));
   }
-  return finalizeReport(findings, keyCount, truncated);
+  return finalizeReport(findings, keyCount, cap);
 }
 
 function algorithmCompatibleWithKey(alg, key) {

@@ -16,6 +16,7 @@ import {
   normalizeOptions
 } from './keys.mjs';
 import { auditEndpointUrl } from './urlsec.mjs';
+import { capFindings } from './reporting.mjs';
 
 const REGISTERED_HEADER_PARAMETERS = new Set([
   'alg', 'jku', 'jwk', 'kid', 'x5u', 'x5c', 'x5t', 'x5t#S256', 'typ', 'cty', 'crit',
@@ -34,19 +35,15 @@ function finding(code, severity, field, message) {
   return { code, severity, field, message };
 }
 
-function finalizeReport(findings, cap) {
-  const truncated = findings.length > cap;
-  const limited = truncated ? findings.slice(0, cap) : findings;
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const hit of limited) {
-    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
-  }
+function finalizeReport(allFindings, cap) {
+  const capped = capFindings(allFindings, cap);
+  const counts = capped.counts;
   const safe = counts.critical === 0 && counts.high === 0;
   return deepFreeze({
     safe,
-    findings: limited.map((hit) => Object.freeze({ ...hit })),
+    findings: capped.limited.map((hit) => Object.freeze({ ...hit })),
     counts,
-    truncated,
+    truncated: capped.truncated,
     keysAudited: 0,
     context: 'jwt-header'
   });
@@ -71,7 +68,7 @@ export function auditJwtHeader(input, options) {
   }
   const findings = [];
   const push = (hit) => {
-    if (findings.length < cap) findings.push(hit);
+    findings.push(hit);
   };
   if (Object.keys(header).length > bounds.maxObjectKeys) {
     push(finding('HEADER_TOO_MANY_MEMBERS', 'high', 'header', 'header exceeds the member-count budget'));

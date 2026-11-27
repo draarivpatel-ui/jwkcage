@@ -22,6 +22,7 @@ import {
 import { fail, JwkCageError } from './errors.mjs';
 import { parseJsonStrict, scanObjectForPollution } from './jsonparse.mjs';
 import { auditEndpointUrl } from './urlsec.mjs';
+import { capFindings } from './reporting.mjs';
 
 const BASE64URL_RE = /^[A-Za-z0-9_-]*$/u;
 const CONTROL_RE = /[\u0000-\u001f\u007f]/u;
@@ -104,7 +105,6 @@ export function normalizeBounds(options) {
 export function materializeJsonInput(input, bounds, maxDepth, caller) {
   if (typeof input === 'string') {
     if (Buffer.byteLength(input, 'utf8') > bounds.maxJsonBytes) fail(CODE.INPUT_TOO_LARGE, caller + ' JSON input exceeds the byte budget');
-    if (CONTROL_RE.test(input)) fail(CODE.MALFORMED_JSON, caller + ' input contains control characters');
     const parsed = parseJsonStrict(input, maxDepth);
     if (!isPlainObject(parsed)) fail(CODE.INVALID_INPUT, caller + ' JSON input must be an object');
     return parsed;
@@ -161,6 +161,12 @@ function expectBase64url(object, key, required) {
     return undefined;
   }
   if (!isBase64url(value)) fail(CODE.INVALID_BASE64URL, key + ' is not valid unpadded base64url', { field: key });
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const last = alphabet.indexOf(value[value.length - 1]);
+  const remainder = value.length % 4;
+  if ((remainder === 2 && (last & 15) !== 0) || (remainder === 3 && (last & 3) !== 0)) {
+    fail(CODE.INVALID_BASE64URL, key + ' has non-canonical base64url pad bits', { field: key });
+  }
   return value;
 }
 
@@ -222,6 +228,36 @@ function validateRsa(key, bounds) {
   return { modulus, exponent: base64urlBigInt(key.e), modulusBits: countBits(modulus) };
 }
 
+const EC_CURVE_PARAMETERS = Object.freeze({
+  'P-256': Object.freeze({
+    p: BigInt('0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff'),
+    b: BigInt('0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b')
+  }),
+  'P-384': Object.freeze({
+    p: BigInt('0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff'),
+    b: BigInt('0xb3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef')
+  }),
+  'P-521': Object.freeze({
+    p: BigInt('0x01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'),
+    b: BigInt('0x0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00')
+  })
+});
+
+function positiveMod(value, modulus) {
+  const out = value % modulus;
+  return out >= 0n ? out : out + modulus;
+}
+
+function validateEcPoint(crv, xInt, yInt) {
+  const params = EC_CURVE_PARAMETERS[crv];
+  if (xInt >= params.p || yInt >= params.p) {
+    fail(CODE.INVALID_EC_PARAMETERS, 'EC coordinate is outside the ' + crv + ' field', { field: 'x' });
+  }
+  const left = positiveMod(yInt * yInt, params.p);
+  const right = positiveMod(xInt * xInt * xInt - 3n * xInt + params.b, params.p);
+  if (left !== right) fail(CODE.INVALID_EC_PARAMETERS, 'EC public point is not on ' + crv, { field: 'x' });
+}
+
 function validateEc(key) {
   const crv = expectString(key, 'crv', { maxStringLength: 64 }, true);
   expectBase64url(key, 'x', true);
@@ -235,6 +271,7 @@ function validateEc(key) {
   const xInt = base64urlBigInt(key.x);
   const yInt = base64urlBigInt(key.y);
   if (xInt === 0n && yInt === 0n) fail(CODE.INVALID_EC_PARAMETERS, 'point at infinity origin is not a valid public key', { field: 'x' });
+  validateEcPoint(crv, xInt, yInt);
   return { crv };
 }
 
@@ -369,6 +406,9 @@ export function auditJwk(input, options) {
     else {
       const familyMismatch = algFamilyMismatch(key.alg, structure.family);
       if (familyMismatch) findings.push(finding('ALG_KTY_MISMATCH', 'critical', 'alg', key.alg + ' cannot be used with key type ' + structure.family));
+      if (!familyMismatch && structure.family === 'EC' && CURVE_FOR_ES[key.alg] !== undefined && structure.crv !== CURVE_FOR_ES[key.alg]) {
+        findings.push(finding('ALG_CURVE_MISMATCH', 'critical', 'alg', key.alg + ' cannot be used with curve ' + structure.crv));
+      }
     }
   }
   if (key.kid !== undefined) {
@@ -407,19 +447,15 @@ function algFamilyMismatch(alg, family) {
 
 function finalizeReport(findings, opts, bounds) {
   const cap = bounds === undefined ? DEFAULT_BOUNDS.maxFindings : bounds.maxFindings;
-  const truncated = findings.length > cap;
-  const limited = truncated ? findings.slice(0, cap) : findings;
-  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  for (const hit of limited) {
-    if (counts[hit.severity] !== undefined) counts[hit.severity] += 1;
-  }
+  const capped = capFindings(findings, cap);
+  const counts = capped.counts;
   const safe = counts.critical === 0 && counts.high === 0;
   return deepFreeze({
     safe,
-    findings: limited.map((hit) => Object.freeze({ ...hit })),
+    findings: capped.limited.map((hit) => Object.freeze({ ...hit })),
     counts,
-    truncated,
-    keysAudited: limited.length === 0 ? 0 : 1,
+    truncated: capped.truncated,
+    keysAudited: 1,
     context: opts.context === undefined ? 'jwk' : String(opts.context)
   });
 }

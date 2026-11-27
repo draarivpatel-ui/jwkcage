@@ -31,7 +31,7 @@ export function auditEndpointUrl(value, field) {
     const schemeEnd = value.indexOf('//');
     const authorityStart = schemeEnd === -1 ? 0 : schemeEnd + 2;
     let authorityEnd = value.length;
-    for (const delimiter of ['/', '?', '#']) {
+    for (const delimiter of ['/', '\\', '?', '#']) {
       const at = value.indexOf(delimiter, authorityStart);
       if (at !== -1 && at < authorityEnd) authorityEnd = at;
     }
@@ -86,6 +86,18 @@ export function auditEndpointUrl(value, field) {
       if (labels.some((label) => label.startsWith('-') || label.endsWith('-'))) add('ENDPOINT_URL_HOST_HYPHEN_EDGE', 'medium', field + ' host label begins or ends with a hyphen');
     }
   }
+  if (!bracketed && rawHost.endsWith('.')) add('ENDPOINT_URL_TRAILING_DOT', 'high', field + ' host uses a trailing-dot fully qualified DNS form');
+  const canonicalHost = host.replace(/^\[|\]$/gu, '').toLowerCase();
+  if (!bracketed && canonicalHost !== '' && canonicalHost !== bareHost) {
+    const canonicalV4 = parseIpv4Like(canonicalHost.replace(/\.$/u, ''));
+    if (canonicalV4 && canonicalV4.numericLike && canonicalV4.valid) {
+      const scope = ipv4Scope(canonicalV4.bytes);
+      if (scope !== 'public') add('ENDPOINT_URL_IP_NOT_PUBLIC', 'critical', field + ' canonically targets a non-public IPv4 scope: ' + scope);
+    } else if (internalHostname(canonicalHost)) {
+      add('ENDPOINT_URL_INTERNAL_HOST', 'critical', field + ' canonically targets localhost or an internal name');
+    }
+  }
+  if (bracketed === false && /\\/u.test(value)) add('ENDPOINT_URL_BACKSLASH_CONFUSION', 'high', field + ' contains a backslash that URL parsers may treat as a delimiter');
   if (parsed.port !== '') {
     const portNumber = Number(parsed.port);
     if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) add('ENDPOINT_URL_BAD_PORT', 'high', field + ' uses an invalid port');
