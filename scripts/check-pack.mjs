@@ -99,7 +99,11 @@ if (forbidden.length > 0) {
   process.exit(1);
 }
 const bin = info.files.find((file) => file.path === 'bin/jwkcage.mjs');
-if (!bin || (bin.mode & 0o111) === 0) {
+if (!bin) {
+  console.error('bin/jwkcage.mjs is missing from the package');
+  process.exit(1);
+}
+if (process.platform !== 'win32' && (bin.mode & 0o111) === 0) {
   console.error('bin/jwkcage.mjs is not executable in the package');
   process.exit(1);
 }
