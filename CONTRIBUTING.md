@@ -2,7 +2,7 @@
 
 ## Development setup
 
-Node.js 18 or newer. There are no dependencies to install.
+Node.js 18 or newer. Runtime dependencies are zero; run `npm ci` to install the pinned fast-check development dependency used by property fuzzing.
 
 ```sh
 node scripts/run-tests.mjs
@@ -16,7 +16,7 @@ node scripts/check-pack.mjs
 
 - Every security behavior change ships with regression tests, including the hostile input matrix.
 - The CommonJS build is generated: edit `src/`, then run `node scripts/build-cjs.mjs` and commit the result.
-- No dependencies, runtime or development.
+- No runtime dependencies. Development dependencies stay limited to the pinned fast-check property-testing library.
 - No network access in library code, tests, or examples.
 - Private key material never appears in error messages, findings, or logs. Tests use generated throwaway keys only.
 - Line endings are LF everywhere; `scripts/build-cjs.mjs` normalizes generated output.

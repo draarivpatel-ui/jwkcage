@@ -1,5 +1,7 @@
 # jwkcage
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/draarivpatel-ui/jwkcage/badge)](https://scorecard.dev/viewer/?uri=github.com/draarivpatel-ui/jwkcage)
+
 `jwkcage` is a zero-dependency JWK, JWKS, and JWT header security firewall for Node.js. It implements strict RFC 7517 and RFC 7518 structural validation, RFC 7638 canonical thumbprints, and a fail-closed verification key selector for services that consume JSON Web Keys before any signature or encryption operation is trusted.
 
 The library performs no network access. It audits, it does not fetch.
@@ -27,7 +29,7 @@ The library performs no network access. It audits, it does not fetch.
 npm install jwkcage
 ```
 
-Node.js 18 or newer is required. The package has no runtime dependencies and no development dependencies. It ships native ESM, generated CommonJS, TypeScript declarations, and a CLI.
+Node.js 18 or newer is required. The package has no runtime dependencies. It ships native ESM, generated CommonJS, TypeScript declarations, and a CLI.
 
 ## Quick start
 

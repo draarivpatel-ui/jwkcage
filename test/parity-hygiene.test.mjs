@@ -178,10 +178,11 @@ test('repository text files have no ascii control bytes', () => {
   assert.deepEqual(offenders, []);
 });
 
-test('package metadata is zero dependency', () => {
+test('package metadata is zero runtime dependency with only pinned fuzz development dependency', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.deepEqual(manifest.dependencies, {});
-  assert.deepEqual(manifest.devDependencies, {});
+  assert.deepEqual(Object.keys(manifest.devDependencies), ['fast-check']);
+  assert.match(manifest.devDependencies['fast-check'], /^\d+\.\d+\.\d+$/);
   assert.equal(manifest.name, 'jwkcage');
   assert.equal(manifest.version, '1.0.0');
 });
